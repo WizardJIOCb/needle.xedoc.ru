@@ -4,6 +4,10 @@ import { HAY_COUNT, HAY_RADIUS, mulberry32, needlePosition, surfaceHeight } from
 
 const PLAYER_HEIGHT = 1.62;
 const ARENA_RADIUS = 15.5;
+const STRAW_HALF_LENGTH = 0.36;
+const STRAW_COLLIDER_RADIUS = 0.028;
+const STRAW_CELL_SIZE = 0.58;
+const MAX_ACTIVE_STRAWS = 640;
 
 interface GameCallbacks {
   onMove: (position: Vec3State, yaw: number) => void;
@@ -31,12 +35,12 @@ interface Pulse {
   duration: number;
 }
 
-interface DynamicStraw {
-  mesh: THREE.Mesh<THREE.CylinderGeometry, THREE.MeshStandardMaterial>;
-  velocity: THREE.Vector3;
-  spin: THREE.Vector3;
-  age: number;
-  settled: boolean;
+function fieldHeight(x: number, z: number): number {
+  const radius = Math.hypot(x, z);
+  const outside = THREE.MathUtils.smoothstep(radius, 17.5, 27);
+  const rolling = Math.sin(x * 0.115) * Math.cos(z * 0.09) * 0.34
+    + Math.sin((x + z) * 0.047) * 0.22;
+  return -0.08 - outside * 0.36 + rolling * outside;
 }
 
 export class HaywireGame {
@@ -61,11 +65,29 @@ export class HaywireGame {
   };
   readonly hayOriginalMatrices: THREE.Matrix4[] = [];
   readonly pulledStrawIds = new Set<number>();
-  readonly dynamicStraws: DynamicStraw[] = [];
+  readonly activeStrawIds = new Set<number>();
+  readonly strawSpatial = new Map<number, Set<number>>();
+  readonly strawPositions = new Float32Array(HAY_COUNT * 3);
+  readonly strawOriginalPositions = new Float32Array(HAY_COUNT * 3);
+  readonly strawQuaternions = new Float32Array(HAY_COUNT * 4);
+  readonly strawOriginalQuaternions = new Float32Array(HAY_COUNT * 4);
+  readonly strawScales = new Float32Array(HAY_COUNT);
+  readonly strawOriginalScales = new Float32Array(HAY_COUNT);
+  readonly strawVelocities = new Float32Array(HAY_COUNT * 3);
+  readonly strawSpins = new Float32Array(HAY_COUNT * 3);
+  readonly strawSleepTimers = new Float32Array(HAY_COUNT);
+  readonly strawActiveAges = new Float32Array(HAY_COUNT);
+  readonly strawAwake = new Uint8Array(HAY_COUNT);
+  readonly strawContacts = new Uint8Array(HAY_COUNT);
+  readonly strawCells = new Int32Array(HAY_COUNT).fill(-1);
+  readonly dirtyStrawIds = new Set<number>();
+  readonly strawMatrix = new THREE.Matrix4();
+  readonly strawMatrixPosition = new THREE.Vector3();
+  readonly strawMatrixQuaternion = new THREE.Quaternion();
+  readonly strawMatrixScale = new THREE.Vector3();
 
   hay!: THREE.InstancedMesh<THREE.CylinderGeometry, THREE.MeshStandardMaterial>;
   hayGeometry!: THREE.CylinderGeometry;
-  dynamicHayMaterial!: THREE.MeshStandardMaterial;
 
   yaw = Math.PI;
   pitch = -0.2;
@@ -80,6 +102,7 @@ export class HaywireGame {
   attractAngle = 0;
   pulling = false;
   lastInteraction = 0;
+  collisionWakeBudget = 0;
 
   constructor(host: HTMLDivElement, callbacks: GameCallbacks) {
     this.host = host;
@@ -158,6 +181,66 @@ export class HaywireGame {
   }
 
   private createArena(): void {
+    const fieldGeometry = new THREE.PlaneGeometry(158, 158, 96, 96);
+    fieldGeometry.rotateX(-Math.PI / 2);
+    const fieldPositions = fieldGeometry.getAttribute('position') as THREE.BufferAttribute;
+    for (let index = 0; index < fieldPositions.count; index += 1) {
+      const x = fieldPositions.getX(index);
+      const z = fieldPositions.getZ(index);
+      fieldPositions.setY(index, fieldHeight(x, z));
+    }
+    fieldPositions.needsUpdate = true;
+    const fieldColors = new Float32Array(fieldPositions.count * 3);
+    const dryField = new THREE.Color(0x71662f);
+    const greenField = new THREE.Color(0x3d5427);
+    const fieldColor = new THREE.Color();
+    for (let index = 0; index < fieldPositions.count; index += 1) {
+      const x = fieldPositions.getX(index);
+      const z = fieldPositions.getZ(index);
+      const patch = THREE.MathUtils.clamp(0.48 + Math.sin(x * 0.19) * 0.2 + Math.cos(z * 0.16) * 0.18, 0, 1);
+      fieldColor.copy(greenField).lerp(dryField, patch).toArray(fieldColors, index * 3);
+    }
+    fieldGeometry.setAttribute('color', new THREE.BufferAttribute(fieldColors, 3));
+    fieldGeometry.computeVertexNormals();
+    const field = new THREE.Mesh(
+      fieldGeometry,
+      new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 1, metalness: 0 }),
+    );
+    field.receiveShadow = true;
+    this.scene.add(field);
+
+    const grassGeometry = new THREE.ConeGeometry(0.028, 0.42, 3, 1);
+    const grassMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 1,
+      vertexColors: true,
+      side: THREE.DoubleSide,
+      emissive: 0x20310f,
+      emissiveIntensity: 0.24,
+    });
+    const grassCount = 36_000;
+    const grass = new THREE.InstancedMesh(grassGeometry, grassMaterial, grassCount);
+    const grassRandom = mulberry32(0x6a55c0);
+    const grassDummy = new THREE.Object3D();
+    const grassColors = [0x657b31, 0x78883b, 0x536c2b, 0x8a8439, 0x6f7130].map((color) => new THREE.Color(color));
+    for (let index = 0; index < grassCount; index += 1) {
+      const angle = grassRandom() * Math.PI * 2;
+      const radius = Math.sqrt(18.2 * 18.2 + grassRandom() * (77 * 77 - 18.2 * 18.2));
+      const x = Math.cos(angle) * radius;
+      const z = Math.sin(angle) * radius;
+      const heightScale = 0.58 + grassRandom() * 1.18;
+      grassDummy.position.set(x, fieldHeight(x, z) + 0.21 * heightScale, z);
+      grassDummy.rotation.set((grassRandom() - 0.5) * 0.22, grassRandom() * Math.PI * 2, (grassRandom() - 0.5) * 0.18);
+      grassDummy.scale.set(0.7 + grassRandom() * 0.75, heightScale, 0.7 + grassRandom() * 0.75);
+      grassDummy.updateMatrix();
+      grass.setMatrixAt(index, grassDummy.matrix);
+      grass.setColorAt(index, grassColors[Math.floor(grassRandom() * grassColors.length)]);
+    }
+    grass.instanceMatrix.needsUpdate = true;
+    if (grass.instanceColor) grass.instanceColor.needsUpdate = true;
+    grass.frustumCulled = false;
+    this.scene.add(grass);
+
     const earth = new THREE.Mesh(
       new THREE.CylinderGeometry(18, 18.8, 0.6, 96),
       new THREE.MeshStandardMaterial({ color: 0x3b3224, roughness: 1, metalness: 0 }),
@@ -220,7 +303,9 @@ export class HaywireGame {
     for (let i = 0; i < 1000; i += 1) {
       const angle = random() * Math.PI * 2;
       const radius = 18.5 + random() * 34;
-      dummy.position.set(Math.cos(angle) * radius, random() * 0.15, Math.sin(angle) * radius);
+      const x = Math.cos(angle) * radius;
+      const z = Math.sin(angle) * radius;
+      dummy.position.set(x, fieldHeight(x, z) + 0.42, z);
       dummy.rotation.set((random() - 0.5) * 0.8, random() * Math.PI, (random() - 0.5) * 0.8);
       dummy.scale.setScalar(0.7 + random() * 1.4);
       dummy.updateMatrix();
@@ -259,6 +344,16 @@ export class HaywireGame {
       dummy.updateMatrix();
       hay.setMatrixAt(i, dummy.matrix);
       this.hayOriginalMatrices.push(dummy.matrix.clone());
+      const positionOffset = i * 3;
+      const quaternionOffset = i * 4;
+      this.strawPositions[positionOffset] = this.strawOriginalPositions[positionOffset] = dummy.position.x;
+      this.strawPositions[positionOffset + 1] = this.strawOriginalPositions[positionOffset + 1] = dummy.position.y;
+      this.strawPositions[positionOffset + 2] = this.strawOriginalPositions[positionOffset + 2] = dummy.position.z;
+      this.strawQuaternions[quaternionOffset] = this.strawOriginalQuaternions[quaternionOffset] = dummy.quaternion.x;
+      this.strawQuaternions[quaternionOffset + 1] = this.strawOriginalQuaternions[quaternionOffset + 1] = dummy.quaternion.y;
+      this.strawQuaternions[quaternionOffset + 2] = this.strawOriginalQuaternions[quaternionOffset + 2] = dummy.quaternion.z;
+      this.strawQuaternions[quaternionOffset + 3] = this.strawOriginalQuaternions[quaternionOffset + 3] = dummy.quaternion.w;
+      this.strawScales[i] = this.strawOriginalScales[i] = scale;
       const color = colors[Math.floor(random() * colors.length)].clone().multiplyScalar(0.88 + random() * 0.24);
       hay.setColorAt(i, color);
     }
@@ -273,12 +368,7 @@ export class HaywireGame {
     this.scene.add(hay);
     this.hay = hay;
     this.hayGeometry = geometry;
-    this.dynamicHayMaterial = new THREE.MeshStandardMaterial({
-      color: 0xc18129,
-      roughness: 0.92,
-      emissive: 0x582508,
-      emissiveIntensity: 0.18,
-    });
+    for (let instanceId = 0; instanceId < HAY_COUNT; instanceId += 1) this.addStrawToSpatial(instanceId);
   }
 
   private createNeedle(): void {
@@ -353,11 +443,17 @@ export class HaywireGame {
     });
     this.renderer.domElement.addEventListener('mousedown', (event) => {
       if (!this.playing) return;
-      if (document.pointerLockElement !== this.renderer.domElement) return this.requestControl();
+      if (document.pointerLockElement !== this.renderer.domElement) {
+        this.pulling = false;
+        return this.requestControl();
+      }
       if (event.button === 0) {
         this.pulling = true;
         this.interact();
       }
+    });
+    document.addEventListener('pointerlockchange', () => {
+      if (document.pointerLockElement !== this.renderer.domElement) this.pulling = false;
     });
     window.addEventListener('mouseup', (event) => { if (event.button === 0) this.pulling = false; });
     window.addEventListener('blur', () => { this.pulling = false; });
@@ -372,6 +468,7 @@ export class HaywireGame {
 
   enterRoom(room: RoomSnapshot, playerId: string): void {
     this.playing = true;
+    this.pulling = false;
     this.localPlayerId = playerId;
     this.roundSeed = room.seed;
     const local = room.players.find((player) => player.id === playerId);
@@ -389,6 +486,7 @@ export class HaywireGame {
 
   leaveRoom(): void {
     this.playing = false;
+    this.pulling = false;
     this.localPlayerId = '';
     this.clearRemotes();
     this.resetHay();
@@ -553,12 +651,12 @@ export class HaywireGame {
     const direction = this.raycaster.ray.direction;
     let bestDistance = maxDistance;
     let bestInstance = -1;
-    for (let instanceId = 0; instanceId < this.hayOriginalMatrices.length; instanceId += 1) {
+    for (let instanceId = 0; instanceId < HAY_COUNT; instanceId += 1) {
       if (this.pulledStrawIds.has(instanceId)) continue;
-      const elements = this.hayOriginalMatrices[instanceId].elements;
-      const x = elements[12] - origin.x;
-      const y = elements[13] - origin.y;
-      const z = elements[14] - origin.z;
+      const offset = instanceId * 3;
+      const x = this.strawPositions[offset] - origin.x;
+      const y = this.strawPositions[offset + 1] - origin.y;
+      const z = this.strawPositions[offset + 2] - origin.z;
       const distance = x * direction.x + y * direction.y + z * direction.z;
       if (distance < 0.15 || distance >= maxDistance) continue;
       const perpendicularSq = x * x + y * y + z * z - distance * distance;
@@ -571,59 +669,205 @@ export class HaywireGame {
     return bestInstance >= 0 ? { instanceId: bestInstance, distance: bestDistance } : null;
   }
 
-  pullStraw(instanceId: number, playerId?: string, animate = true): void {
-    if (!Number.isInteger(instanceId) || instanceId < 0 || instanceId >= this.hayOriginalMatrices.length) return;
-    if (this.pulledStrawIds.has(instanceId)) return;
-    this.pulledStrawIds.add(instanceId);
-
-    const hidden = new THREE.Matrix4().compose(
-      new THREE.Vector3(0, -100, 0),
-      new THREE.Quaternion(),
-      new THREE.Vector3(0, 0, 0),
+  private strawCellKey(x: number, y: number, z: number): number {
+    return this.strawCellKeyFromIndices(
+      Math.floor(x / STRAW_CELL_SIZE),
+      Math.floor(y / STRAW_CELL_SIZE),
+      Math.floor(z / STRAW_CELL_SIZE),
     );
-    this.hay.setMatrixAt(instanceId, hidden);
-    this.hay.instanceMatrix.needsUpdate = true;
-    if (!animate) return;
+  }
 
-    const mesh = new THREE.Mesh(this.hayGeometry, this.dynamicHayMaterial);
-    this.hayOriginalMatrices[instanceId].decompose(mesh.position, mesh.quaternion, mesh.scale);
+  private strawCellKeyFromIndices(x: number, y: number, z: number): number {
+    return ((x + 128) & 0xff) | (((z + 128) & 0xff) << 8) | (((y + 32) & 0x7f) << 16);
+  }
+
+  private addStrawToSpatial(instanceId: number): void {
+    const offset = instanceId * 3;
+    const key = this.strawCellKey(
+      this.strawPositions[offset],
+      this.strawPositions[offset + 1],
+      this.strawPositions[offset + 2],
+    );
+    let bucket = this.strawSpatial.get(key);
+    if (!bucket) {
+      bucket = new Set<number>();
+      this.strawSpatial.set(key, bucket);
+    }
+    bucket.add(instanceId);
+    this.strawCells[instanceId] = key;
+  }
+
+  private updateStrawSpatial(instanceId: number): void {
+    const offset = instanceId * 3;
+    const nextKey = this.strawCellKey(
+      this.strawPositions[offset],
+      this.strawPositions[offset + 1],
+      this.strawPositions[offset + 2],
+    );
+    const previousKey = this.strawCells[instanceId];
+    if (nextKey === previousKey) return;
+    const previous = this.strawSpatial.get(previousKey);
+    previous?.delete(instanceId);
+    if (previous?.size === 0) this.strawSpatial.delete(previousKey);
+    let next = this.strawSpatial.get(nextKey);
+    if (!next) {
+      next = new Set<number>();
+      this.strawSpatial.set(nextKey, next);
+    }
+    next.add(instanceId);
+    this.strawCells[instanceId] = nextKey;
+  }
+
+  private writeStrawMatrix(instanceId: number): void {
+    const positionOffset = instanceId * 3;
+    const quaternionOffset = instanceId * 4;
+    this.strawMatrixPosition.fromArray(this.strawPositions, positionOffset);
+    this.strawMatrixQuaternion.fromArray(this.strawQuaternions, quaternionOffset);
+    this.strawMatrixScale.setScalar(this.strawScales[instanceId]);
+    this.strawMatrix.compose(this.strawMatrixPosition, this.strawMatrixQuaternion, this.strawMatrixScale);
+    this.hay.setMatrixAt(instanceId, this.strawMatrix);
+  }
+
+  private activateStraw(instanceId: number): void {
+    if (this.strawAwake[instanceId]) return;
+    if (this.activeStrawIds.size >= MAX_ACTIVE_STRAWS) this.sleepOldestStraw();
+    this.strawAwake[instanceId] = 1;
+    this.strawSleepTimers[instanceId] = 0;
+    this.strawActiveAges[instanceId] = 0;
+    this.activeStrawIds.add(instanceId);
+    this.dirtyStrawIds.add(instanceId);
+  }
+
+  private sleepStraw(instanceId: number): void {
+    this.strawAwake[instanceId] = 0;
+    this.activeStrawIds.delete(instanceId);
+    const offset = instanceId * 3;
+    this.strawVelocities.fill(0, offset, offset + 3);
+    this.strawSpins.fill(0, offset, offset + 3);
+    this.strawSleepTimers[instanceId] = 0;
+    this.dirtyStrawIds.add(instanceId);
+  }
+
+  private sleepOldestStraw(): void {
+    let fallback = -1;
+    for (const instanceId of this.activeStrawIds) {
+      fallback = instanceId;
+      if (!this.pulledStrawIds.has(instanceId)) break;
+    }
+    if (fallback >= 0) this.sleepStraw(fallback);
+  }
+
+  private wakeUnsupportedStraws(sourceId: number): void {
+    const sourceOffset = sourceId * 3;
+    const sourceX = this.strawPositions[sourceOffset];
+    const sourceY = this.strawPositions[sourceOffset + 1];
+    const sourceZ = this.strawPositions[sourceOffset + 2];
+    const centerX = Math.floor(sourceX / STRAW_CELL_SIZE);
+    const centerY = Math.floor(sourceY / STRAW_CELL_SIZE);
+    const centerZ = Math.floor(sourceZ / STRAW_CELL_SIZE);
+    let woken = 0;
+    for (let cellY = centerY - 1; cellY <= centerY + 2 && woken < 20; cellY += 1) {
+      for (let cellZ = centerZ - 2; cellZ <= centerZ + 2 && woken < 20; cellZ += 1) {
+        for (let cellX = centerX - 2; cellX <= centerX + 2 && woken < 20; cellX += 1) {
+          const bucket = this.strawSpatial.get(this.strawCellKeyFromIndices(cellX, cellY, cellZ));
+          if (!bucket) continue;
+          for (const instanceId of bucket) {
+            if (instanceId === sourceId || this.strawAwake[instanceId] || this.pulledStrawIds.has(instanceId)) continue;
+            const offset = instanceId * 3;
+            const dx = this.strawPositions[offset] - sourceX;
+            const dy = this.strawPositions[offset + 1] - sourceY;
+            const dz = this.strawPositions[offset + 2] - sourceZ;
+            if (dy < -0.18 || dy > 1.45 || dx * dx + dz * dz > 0.92 * 0.92) continue;
+            this.activateStraw(instanceId);
+            const jitter = ((Math.imul(instanceId ^ sourceId, 2654435761) >>> 8) & 0xffff) / 0xffff - 0.5;
+            this.strawVelocities[offset] = dx * 0.08 + jitter * 0.06;
+            this.strawVelocities[offset + 1] = -0.05;
+            this.strawVelocities[offset + 2] = dz * 0.08 - jitter * 0.06;
+            woken += 1;
+            if (woken >= 20) break;
+          }
+        }
+      }
+    }
+  }
+
+  private placeHistoricalStraw(instanceId: number): void {
+    const random = mulberry32((this.roundSeed ^ Math.imul(instanceId + 1, 0x45d9f3b)) >>> 0);
+    const angle = random() * Math.PI * 2;
+    const radius = HAY_RADIUS + 0.9 + random() * 5.1;
+    const offset = instanceId * 3;
+    const quaternionOffset = instanceId * 4;
+    this.strawPositions[offset] = Math.cos(angle) * radius;
+    this.strawPositions[offset + 1] = 0.075 + random() * 0.035;
+    this.strawPositions[offset + 2] = Math.sin(angle) * radius;
+    this.strawMatrixQuaternion.setFromEuler(new THREE.Euler(
+      Math.PI / 2 + (random() - 0.5) * 0.32,
+      random() * Math.PI * 2,
+      (random() - 0.5) * 0.45,
+    ));
+    this.strawMatrixQuaternion.toArray(this.strawQuaternions, quaternionOffset);
+    this.updateStrawSpatial(instanceId);
+    this.writeStrawMatrix(instanceId);
+    this.hay.instanceMatrix.needsUpdate = true;
+  }
+
+  pullStraw(instanceId: number, playerId?: string, animate = true): void {
+    if (!Number.isInteger(instanceId) || instanceId < 0 || instanceId >= HAY_COUNT) return;
+    if (this.pulledStrawIds.has(instanceId)) return;
+    if (animate) this.wakeUnsupportedStraws(instanceId);
+    this.pulledStrawIds.add(instanceId);
+    if (!animate) {
+      this.placeHistoricalStraw(instanceId);
+      return;
+    }
+
+    this.activateStraw(instanceId);
+    const offset = instanceId * 3;
     const source = playerId === this.localPlayerId
       ? this.camera.position
       : this.remotes.get(playerId ?? '')?.group.position ?? this.camera.position;
-    const velocity = source.clone().sub(mesh.position).setY(0.65).normalize().multiplyScalar(3.1 + Math.random() * 1.7);
-    velocity.y += 1.2 + Math.random() * 1.4;
-    const spin = new THREE.Vector3(
-      (Math.random() - 0.5) * 12,
-      (Math.random() - 0.5) * 12,
-      (Math.random() - 0.5) * 12,
-    );
-    mesh.castShadow = true;
-    this.scene.add(mesh);
-    this.dynamicStraws.push({ mesh, velocity, spin, age: 0, settled: false });
-    while (this.dynamicStraws.length > 360) this.removeDynamicStraw(0);
+    const dx = source.x - this.strawPositions[offset];
+    const dy = source.y - this.strawPositions[offset + 1] + 0.65;
+    const dz = source.z - this.strawPositions[offset + 2];
+    const length = Math.max(0.001, Math.hypot(dx, dy, dz));
+    const random = mulberry32((this.roundSeed ^ Math.imul(instanceId + 1, 0x9e3779b1)) >>> 0);
+    const speed = 3.25 + random() * 1.65;
+    this.strawVelocities[offset] = dx / length * speed;
+    this.strawVelocities[offset + 1] = dy / length * speed + 1.2 + random() * 0.75;
+    this.strawVelocities[offset + 2] = dz / length * speed;
+    this.strawSpins[offset] = (random() - 0.5) * 13;
+    this.strawSpins[offset + 1] = (random() - 0.5) * 13;
+    this.strawSpins[offset + 2] = (random() - 0.5) * 13;
   }
 
   private resetHay(): void {
     if (!this.hay) return;
-    for (const instanceId of this.pulledStrawIds) {
-      const matrix = this.hayOriginalMatrices[instanceId];
-      if (matrix) this.hay.setMatrixAt(instanceId, matrix);
+    this.strawPositions.set(this.strawOriginalPositions);
+    this.strawQuaternions.set(this.strawOriginalQuaternions);
+    this.strawScales.set(this.strawOriginalScales);
+    this.strawVelocities.fill(0);
+    this.strawSpins.fill(0);
+    this.strawSleepTimers.fill(0);
+    this.strawActiveAges.fill(0);
+    this.strawAwake.fill(0);
+    this.strawContacts.fill(0);
+    this.strawCells.fill(-1);
+    this.activeStrawIds.clear();
+    this.dirtyStrawIds.clear();
+    this.strawSpatial.clear();
+    for (let instanceId = 0; instanceId < HAY_COUNT; instanceId += 1) {
+      this.hay.setMatrixAt(instanceId, this.hayOriginalMatrices[instanceId]);
+      this.addStrawToSpatial(instanceId);
     }
     this.hay.instanceMatrix.needsUpdate = true;
     this.pulledStrawIds.clear();
-    while (this.dynamicStraws.length) this.removeDynamicStraw(this.dynamicStraws.length - 1);
-  }
-
-  private removeDynamicStraw(index: number): void {
-    const straw = this.dynamicStraws[index];
-    if (!straw) return;
-    this.scene.remove(straw.mesh);
-    this.dynamicStraws.splice(index, 1);
   }
 
   playLocalAction(type: 'sneeze' | 'magnet'): void {
     if (type === 'sneeze') {
-      this.createBurst(this.localPosition.clone().add(new THREE.Vector3(0, 1.1, 0)), 150, 0xe3ae4c);
+      const origin = this.localPosition.clone().add(new THREE.Vector3(0, 1.1, 0));
+      this.createBurst(origin, 150, 0xe3ae4c);
+      this.blastStraws(origin, 3.1, 7.2);
       document.body.animate([
         { transform: 'translate(0,0)' }, { transform: 'translate(-6px,3px)' }, { transform: 'translate(5px,-3px)' }, { transform: 'translate(0,0)' },
       ], { duration: 420, iterations: 1 });
@@ -638,8 +882,37 @@ export class HaywireGame {
     }
     if (action.playerId === this.localPlayerId || !action.position) return;
     const position = new THREE.Vector3(action.position.x, surfaceHeight(action.position.x, action.position.z) + 1, action.position.z);
-    if (action.type === 'sneeze') this.createBurst(position, 120, 0xe3ae4c);
+    if (action.type === 'sneeze') {
+      this.createBurst(position, 120, 0xe3ae4c);
+      this.blastStraws(position, 3.1, 7.2);
+    }
     if (action.type === 'magnet') this.createPulse(position, 0xdfff48, 3.8);
+  }
+
+  private blastStraws(origin: THREE.Vector3, radius: number, power: number): void {
+    const radiusSq = radius * radius;
+    let affected = 0;
+    for (let instanceId = 0; instanceId < HAY_COUNT && affected < 360; instanceId += 1) {
+      if (this.pulledStrawIds.has(instanceId)) continue;
+      const offset = instanceId * 3;
+      const dx = this.strawPositions[offset] - origin.x;
+      const dy = this.strawPositions[offset + 1] - origin.y;
+      const dz = this.strawPositions[offset + 2] - origin.z;
+      const distanceSq = dx * dx + dy * dy + dz * dz;
+      if (distanceSq > radiusSq) continue;
+      const distance = Math.max(0.18, Math.sqrt(distanceSq));
+      const force = (1 - distance / radius) * power;
+      if (force <= 0.12) continue;
+      this.activateStraw(instanceId);
+      this.strawVelocities[offset] += dx / distance * force;
+      this.strawVelocities[offset + 1] += Math.max(0.8, dy / distance * force + force * 0.44);
+      this.strawVelocities[offset + 2] += dz / distance * force;
+      const twist = ((Math.imul(instanceId + 7, 1103515245) >>> 9) & 0xffff) / 0xffff - 0.5;
+      this.strawSpins[offset] += twist * 10;
+      this.strawSpins[offset + 1] -= twist * 8;
+      this.strawSpins[offset + 2] += twist * 12;
+      affected += 1;
+    }
   }
 
   private createBurst(origin: THREE.Vector3, count: number, color: number): void {
@@ -703,30 +976,286 @@ export class HaywireGame {
     }
   }
 
-  private updateDynamicStraws(delta: number): void {
-    const rotation = new THREE.Quaternion();
-    for (let index = this.dynamicStraws.length - 1; index >= 0; index -= 1) {
-      const straw = this.dynamicStraws[index];
-      straw.age += delta;
-      if (!straw.settled) {
-        straw.velocity.y -= 8.8 * delta;
-        straw.mesh.position.addScaledVector(straw.velocity, delta);
-        rotation.setFromEuler(new THREE.Euler(straw.spin.x * delta, straw.spin.y * delta, straw.spin.z * delta));
-        straw.mesh.quaternion.multiply(rotation).normalize();
-        straw.velocity.multiplyScalar(Math.pow(0.985, delta * 60));
+  private integrateStrawRotation(instanceId: number, delta: number): void {
+    const velocityOffset = instanceId * 3;
+    const quaternionOffset = instanceId * 4;
+    const wx = this.strawSpins[velocityOffset];
+    const wy = this.strawSpins[velocityOffset + 1];
+    const wz = this.strawSpins[velocityOffset + 2];
+    const angularSpeed = Math.hypot(wx, wy, wz);
+    if (angularSpeed < 0.0001) return;
+    const halfAngle = angularSpeed * delta * 0.5;
+    const scale = Math.sin(halfAngle) / angularSpeed;
+    const dx = wx * scale;
+    const dy = wy * scale;
+    const dz = wz * scale;
+    const dw = Math.cos(halfAngle);
+    const qx = this.strawQuaternions[quaternionOffset];
+    const qy = this.strawQuaternions[quaternionOffset + 1];
+    const qz = this.strawQuaternions[quaternionOffset + 2];
+    const qw = this.strawQuaternions[quaternionOffset + 3];
+    const nx = dw * qx + dx * qw + dy * qz - dz * qy;
+    const ny = dw * qy - dx * qz + dy * qw + dz * qx;
+    const nz = dw * qz + dx * qy - dy * qx + dz * qw;
+    const nw = dw * qw - dx * qx - dy * qy - dz * qz;
+    const inverseLength = 1 / Math.max(0.0001, Math.hypot(nx, ny, nz, nw));
+    this.strawQuaternions[quaternionOffset] = nx * inverseLength;
+    this.strawQuaternions[quaternionOffset + 1] = ny * inverseLength;
+    this.strawQuaternions[quaternionOffset + 2] = nz * inverseLength;
+    this.strawQuaternions[quaternionOffset + 3] = nw * inverseLength;
+  }
 
-        const radius = Math.hypot(straw.mesh.position.x, straw.mesh.position.z);
-        const floor = radius < HAY_RADIUS ? surfaceHeight(straw.mesh.position.x, straw.mesh.position.z) + 0.05 : 0.055;
-        if (straw.mesh.position.y <= floor && straw.velocity.y < 0) {
-          straw.mesh.position.y = floor;
-          straw.velocity.y *= -0.18;
-          straw.velocity.x *= 0.64;
-          straw.velocity.z *= 0.64;
-          straw.spin.multiplyScalar(0.58);
-          if (straw.velocity.lengthSq() < 0.18) straw.settled = true;
-        }
+  private resolveStrawCollision(instanceId: number, otherId: number): boolean {
+    const offsetA = instanceId * 3;
+    const offsetB = otherId * 3;
+    const quaternionA = instanceId * 4;
+    const quaternionB = otherId * 4;
+    const centerDx = this.strawPositions[offsetA] - this.strawPositions[offsetB];
+    const centerDy = this.strawPositions[offsetA + 1] - this.strawPositions[offsetB + 1];
+    const centerDz = this.strawPositions[offsetA + 2] - this.strawPositions[offsetB + 2];
+    const halfA = STRAW_HALF_LENGTH * this.strawScales[instanceId];
+    const halfB = STRAW_HALF_LENGTH * this.strawScales[otherId];
+    const radius = STRAW_COLLIDER_RADIUS * (this.strawScales[instanceId] + this.strawScales[otherId]);
+    const broadDistance = halfA + halfB + radius;
+    if (centerDx * centerDx + centerDy * centerDy + centerDz * centerDz > broadDistance * broadDistance) return false;
+
+    const qax = this.strawQuaternions[quaternionA];
+    const qay = this.strawQuaternions[quaternionA + 1];
+    const qaz = this.strawQuaternions[quaternionA + 2];
+    const qaw = this.strawQuaternions[quaternionA + 3];
+    const qbx = this.strawQuaternions[quaternionB];
+    const qby = this.strawQuaternions[quaternionB + 1];
+    const qbz = this.strawQuaternions[quaternionB + 2];
+    const qbw = this.strawQuaternions[quaternionB + 3];
+    const axisAx = 2 * (qax * qay - qaw * qaz);
+    const axisAy = 1 - 2 * (qax * qax + qaz * qaz);
+    const axisAz = 2 * (qay * qaz + qaw * qax);
+    const axisBx = 2 * (qbx * qby - qbw * qbz);
+    const axisBy = 1 - 2 * (qbx * qbx + qbz * qbz);
+    const axisBz = 2 * (qby * qbz + qbw * qbx);
+    const ux = axisAx * halfA * 2;
+    const uy = axisAy * halfA * 2;
+    const uz = axisAz * halfA * 2;
+    const vx = axisBx * halfB * 2;
+    const vy = axisBy * halfB * 2;
+    const vz = axisBz * halfB * 2;
+    const wx = centerDx - axisAx * halfA + axisBx * halfB;
+    const wy = centerDy - axisAy * halfA + axisBy * halfB;
+    const wz = centerDz - axisAz * halfA + axisBz * halfB;
+    const a = ux * ux + uy * uy + uz * uz;
+    const b = ux * vx + uy * vy + uz * vz;
+    const c = vx * vx + vy * vy + vz * vz;
+    const d = ux * wx + uy * wy + uz * wz;
+    const e = vx * wx + vy * wy + vz * wz;
+    const denominator = a * c - b * b;
+    let sNumerator: number;
+    let sDenominator = denominator;
+    let tNumerator: number;
+    let tDenominator = denominator;
+    if (denominator < 0.000001) {
+      sNumerator = 0;
+      sDenominator = 1;
+      tNumerator = e;
+      tDenominator = c;
+    } else {
+      sNumerator = b * e - c * d;
+      tNumerator = a * e - b * d;
+      if (sNumerator < 0) {
+        sNumerator = 0;
+        tNumerator = e;
+        tDenominator = c;
+      } else if (sNumerator > sDenominator) {
+        sNumerator = sDenominator;
+        tNumerator = e + b;
+        tDenominator = c;
       }
-      if (straw.age > (straw.settled ? 8 : 14)) this.removeDynamicStraw(index);
+    }
+    if (tNumerator < 0) {
+      tNumerator = 0;
+      if (-d < 0) sNumerator = 0;
+      else if (-d > a) sNumerator = sDenominator;
+      else {
+        sNumerator = -d;
+        sDenominator = a;
+      }
+    } else if (tNumerator > tDenominator) {
+      tNumerator = tDenominator;
+      if (-d + b < 0) sNumerator = 0;
+      else if (-d + b > a) sNumerator = sDenominator;
+      else {
+        sNumerator = -d + b;
+        sDenominator = a;
+      }
+    }
+    const segmentA = Math.abs(sNumerator) < 0.000001 ? 0 : sNumerator / sDenominator;
+    const segmentB = Math.abs(tNumerator) < 0.000001 ? 0 : tNumerator / tDenominator;
+    let normalX = wx + segmentA * ux - segmentB * vx;
+    let normalY = wy + segmentA * uy - segmentB * vy;
+    let normalZ = wz + segmentA * uz - segmentB * vz;
+    let distance = Math.hypot(normalX, normalY, normalZ);
+    if (distance >= radius) return false;
+    if (distance < 0.0001) {
+      normalX = centerDx || (instanceId & 1 ? 1 : -1);
+      normalY = centerDy;
+      normalZ = centerDz || (instanceId & 2 ? 1 : -1);
+      distance = Math.max(0.0001, Math.hypot(normalX, normalY, normalZ));
+    }
+    normalX /= distance;
+    normalY /= distance;
+    normalZ /= distance;
+
+    const speedA = Math.hypot(
+      this.strawVelocities[offsetA],
+      this.strawVelocities[offsetA + 1],
+      this.strawVelocities[offsetA + 2],
+    );
+    if (!this.strawAwake[otherId] && this.collisionWakeBudget > 0
+      && this.strawActiveAges[instanceId] > 0.035 && (radius - distance > 0.012 || speedA > 0.85)) {
+      this.activateStraw(otherId);
+      this.collisionWakeBudget -= 1;
+    }
+    const otherAwake = Boolean(this.strawAwake[otherId]);
+    const youngExtraction = this.pulledStrawIds.has(instanceId) && this.strawActiveAges[instanceId] < 0.16;
+    const correction = (radius - distance) * (youngExtraction ? 0.28 : 0.82);
+    const shareA = otherAwake ? 0.5 : 1;
+    this.strawPositions[offsetA] += normalX * correction * shareA;
+    this.strawPositions[offsetA + 1] += normalY * correction * shareA;
+    this.strawPositions[offsetA + 2] += normalZ * correction * shareA;
+    if (otherAwake) {
+      this.strawPositions[offsetB] -= normalX * correction * 0.5;
+      this.strawPositions[offsetB + 1] -= normalY * correction * 0.5;
+      this.strawPositions[offsetB + 2] -= normalZ * correction * 0.5;
+      this.dirtyStrawIds.add(otherId);
+      this.updateStrawSpatial(otherId);
+    }
+
+    const velocityBX = otherAwake ? this.strawVelocities[offsetB] : 0;
+    const velocityBY = otherAwake ? this.strawVelocities[offsetB + 1] : 0;
+    const velocityBZ = otherAwake ? this.strawVelocities[offsetB + 2] : 0;
+    const relativeVelocity = (this.strawVelocities[offsetA] - velocityBX) * normalX
+      + (this.strawVelocities[offsetA + 1] - velocityBY) * normalY
+      + (this.strawVelocities[offsetA + 2] - velocityBZ) * normalZ;
+    if (relativeVelocity < 0) {
+      const impulse = -(1.08 * relativeVelocity) / (otherAwake ? 2 : 1);
+      this.strawVelocities[offsetA] += normalX * impulse;
+      this.strawVelocities[offsetA + 1] += normalY * impulse;
+      this.strawVelocities[offsetA + 2] += normalZ * impulse;
+      if (otherAwake) {
+        this.strawVelocities[offsetB] -= normalX * impulse;
+        this.strawVelocities[offsetB + 1] -= normalY * impulse;
+        this.strawVelocities[offsetB + 2] -= normalZ * impulse;
+      }
+    }
+    this.strawContacts[instanceId] = 1;
+    if (otherAwake) this.strawContacts[otherId] = 1;
+    return true;
+  }
+
+  private updateStrawPhysics(delta: number): void {
+    if (this.activeStrawIds.size === 0) return;
+    const steps = delta > 1 / 45 ? 2 : 1;
+    const stepDelta = delta / steps;
+    const linearDamping = Math.exp(-stepDelta * 0.72);
+    const angularDamping = Math.exp(-stepDelta * 1.08);
+    this.collisionWakeBudget = 4;
+
+    for (let step = 0; step < steps; step += 1) {
+      const active = [...this.activeStrawIds];
+      for (const instanceId of active) {
+        if (!this.strawAwake[instanceId]) continue;
+        const offset = instanceId * 3;
+        const quaternionOffset = instanceId * 4;
+        this.strawContacts[instanceId] = 0;
+        this.strawActiveAges[instanceId] += stepDelta;
+        this.strawVelocities[offset + 1] -= 9.35 * stepDelta;
+        this.strawPositions[offset] += this.strawVelocities[offset] * stepDelta;
+        this.strawPositions[offset + 1] += this.strawVelocities[offset + 1] * stepDelta;
+        this.strawPositions[offset + 2] += this.strawVelocities[offset + 2] * stepDelta;
+        this.integrateStrawRotation(instanceId, stepDelta);
+        this.strawVelocities[offset] *= linearDamping;
+        this.strawVelocities[offset + 1] *= linearDamping;
+        this.strawVelocities[offset + 2] *= linearDamping;
+        this.strawSpins[offset] *= angularDamping;
+        this.strawSpins[offset + 1] *= angularDamping;
+        this.strawSpins[offset + 2] *= angularDamping;
+
+        const qx = this.strawQuaternions[quaternionOffset];
+        const qz = this.strawQuaternions[quaternionOffset + 2];
+        const verticalAxis = Math.abs(1 - 2 * (qx * qx + qz * qz));
+        const bottom = this.strawPositions[offset + 1]
+          - verticalAxis * STRAW_HALF_LENGTH * this.strawScales[instanceId]
+          - STRAW_COLLIDER_RADIUS * this.strawScales[instanceId];
+        const radiusFromCenter = Math.hypot(this.strawPositions[offset], this.strawPositions[offset + 2]);
+        const floor = radiusFromCenter <= 18 ? 0.035 : fieldHeight(this.strawPositions[offset], this.strawPositions[offset + 2]) + 0.025;
+        if (bottom < floor) {
+          this.strawPositions[offset + 1] += floor - bottom;
+          if (this.strawVelocities[offset + 1] < 0) this.strawVelocities[offset + 1] *= -0.14;
+          this.strawVelocities[offset] *= 0.68;
+          this.strawVelocities[offset + 2] *= 0.68;
+          this.strawSpins[offset] *= 0.72;
+          this.strawSpins[offset + 1] *= 0.72;
+          this.strawSpins[offset + 2] *= 0.72;
+          this.strawContacts[instanceId] = 1;
+        }
+        if (radiusFromCenter > 16.75) {
+          const inverseRadius = 1 / radiusFromCenter;
+          const normalX = this.strawPositions[offset] * inverseRadius;
+          const normalZ = this.strawPositions[offset + 2] * inverseRadius;
+          this.strawPositions[offset] = normalX * 16.75;
+          this.strawPositions[offset + 2] = normalZ * 16.75;
+          const radialVelocity = this.strawVelocities[offset] * normalX + this.strawVelocities[offset + 2] * normalZ;
+          if (radialVelocity > 0) {
+            this.strawVelocities[offset] -= normalX * radialVelocity * 1.28;
+            this.strawVelocities[offset + 2] -= normalZ * radialVelocity * 1.28;
+          }
+          this.strawContacts[instanceId] = 1;
+        }
+        this.updateStrawSpatial(instanceId);
+        this.dirtyStrawIds.add(instanceId);
+      }
+
+      const collisionActive = [...this.activeStrawIds];
+      for (const instanceId of collisionActive) {
+        if (!this.strawAwake[instanceId]) continue;
+        const offset = instanceId * 3;
+        const centerX = Math.floor(this.strawPositions[offset] / STRAW_CELL_SIZE);
+        const centerY = Math.floor(this.strawPositions[offset + 1] / STRAW_CELL_SIZE);
+        const centerZ = Math.floor(this.strawPositions[offset + 2] / STRAW_CELL_SIZE);
+        let checked = 0;
+        collisionSearch:
+        for (let cellY = centerY - 1; cellY <= centerY + 1; cellY += 1) {
+          for (let cellZ = centerZ - 1; cellZ <= centerZ + 1; cellZ += 1) {
+            for (let cellX = centerX - 1; cellX <= centerX + 1; cellX += 1) {
+              const bucket = this.strawSpatial.get(this.strawCellKeyFromIndices(cellX, cellY, cellZ));
+              if (!bucket) continue;
+              for (const otherId of bucket) {
+                if (otherId === instanceId || (this.strawAwake[otherId] && otherId < instanceId)) continue;
+                if (this.resolveStrawCollision(instanceId, otherId)) checked += 3;
+                else checked += 1;
+                if (checked >= 28) break collisionSearch;
+              }
+            }
+          }
+        }
+        this.updateStrawSpatial(instanceId);
+
+        const speedSq = this.strawVelocities[offset] ** 2
+          + this.strawVelocities[offset + 1] ** 2
+          + this.strawVelocities[offset + 2] ** 2;
+        const spinSq = this.strawSpins[offset] ** 2
+          + this.strawSpins[offset + 1] ** 2
+          + this.strawSpins[offset + 2] ** 2;
+        if (this.strawContacts[instanceId] && speedSq < 0.045 && spinSq < 0.42 && this.strawActiveAges[instanceId] > 0.2) {
+          this.strawSleepTimers[instanceId] += stepDelta;
+          if (this.strawSleepTimers[instanceId] > 0.72) this.sleepStraw(instanceId);
+        } else this.strawSleepTimers[instanceId] = 0;
+      }
+    }
+
+    if (this.dirtyStrawIds.size > 0) {
+      for (const instanceId of this.dirtyStrawIds) this.writeStrawMatrix(instanceId);
+      this.hay.instanceMatrix.needsUpdate = true;
+      this.dirtyStrawIds.clear();
     }
   }
 
@@ -786,7 +1315,8 @@ export class HaywireGame {
     const elapsed = this.clock.elapsedTime;
     if (this.playing) {
       this.updatePlayer(delta, elapsed);
-      if (this.pulling && performance.now() - this.lastInteraction >= 115) this.interact();
+      if (this.pulling && document.pointerLockElement === this.renderer.domElement
+        && performance.now() - this.lastInteraction >= 115) this.interact();
     }
     else {
       this.attractAngle += delta * 0.065;
@@ -796,7 +1326,7 @@ export class HaywireGame {
     }
     this.updateGoose(delta, elapsed);
     this.updateBursts(delta);
-    this.updateDynamicStraws(delta);
+    this.updateStrawPhysics(delta);
     for (const remote of this.remotes.values()) {
       remote.group.position.lerp(remote.target, 1 - Math.exp(-delta * 9));
       let angleDelta = remote.targetYaw - remote.group.rotation.y;
