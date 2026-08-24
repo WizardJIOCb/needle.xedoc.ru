@@ -285,6 +285,7 @@ if (isProduction) {
   const currentDir = path.dirname(fileURLToPath(import.meta.url));
   const staticDir = path.resolve(currentDir, '../../dist');
   app.use('/assets', express.static(path.join(staticDir, 'assets'), { maxAge: '1y', immutable: true }));
+  app.use('/textures', express.static(path.join(staticDir, 'textures'), { maxAge: '1y', immutable: true }));
   app.get('*path', (_request, response) => {
     response.set('Cache-Control', 'no-cache');
     response.sendFile(path.join(staticDir, 'index.html'));

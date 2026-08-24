@@ -45,7 +45,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
             <div><strong>∞</strong><span>соломинок*</span></div>
             <div><strong>1</strong><span>подлая игла</span></div>
           </div>
-          <small>* видеокарта считает, что около тридцати шести тысяч</small>
+          <small>* видеокарта считает, что около шестидесяти четырёх тысяч</small>
         </div>
 
         <div class="join-card">
@@ -92,7 +92,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <button id="magnet-action" data-key="E"><i>🧲</i><span><b>МАГНИТ</b><small>узнать направление</small></span><kbd>E</kbd><em></em></button>
         <button id="search-action" data-key="ЛКМ"><i>✦</i><span><b>ВЫТАЩИТЬ</b><small>одну соломинку</small></span><kbd>ЛКМ</kbd></button>
       </div>
-      <div class="controls-hint"><span>WASD ДВИЖЕНИЕ</span><span>SHIFT БЕГ</span><span>ESC КУРСОР</span></div>
+      <div class="controls-hint"><span>WASD ДВИЖЕНИЕ</span><span>SHIFT БЕГ</span><span>ПРОБЕЛ ПРЫЖОК</span><span>ESC КУРСОР</span></div>
       <section id="chat" class="chat-panel">
         <button id="chat-toggle" class="chat-title"><span>ЧАТ СТОГА</span><b>свернуть —</b></button>
         <div id="chat-messages" class="chat-messages"></div>

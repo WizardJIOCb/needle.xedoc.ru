@@ -77,10 +77,11 @@ export function snapshot(room: RoomState): RoomSnapshot {
 
 export function clampPosition(position: Vec3State): Vec3State {
   const x = Number.isFinite(position.x) ? position.x : 0;
+  const y = Number.isFinite(position.y) ? Math.min(7.5, Math.max(0, position.y)) : 0;
   const z = Number.isFinite(position.z) ? position.z : 0;
   const length = Math.hypot(x, z);
   const scale = length > ARENA_RADIUS ? ARENA_RADIUS / length : 1;
-  return { x: x * scale, y: 0, z: z * scale };
+  return { x: x * scale, y, z: z * scale };
 }
 
 export function distanceToNeedle(room: RoomState, player: PlayerState): number {

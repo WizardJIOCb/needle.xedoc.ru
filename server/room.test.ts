@@ -12,7 +12,7 @@ test('room names and chat payloads are normalized', () => {
 test('positions remain inside the arena', () => {
   const position = clampPosition({ x: 50, y: 999, z: 0 });
   assert.equal(position.x, 15.5);
-  assert.equal(position.y, 0);
+  assert.equal(position.y, 7.5);
 });
 
 test('needle placement is deterministic and inside the haystack volume', () => {

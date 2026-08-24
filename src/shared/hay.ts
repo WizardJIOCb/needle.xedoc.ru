@@ -1,5 +1,5 @@
 export const HAY_RADIUS = 9.2;
-export const HAY_COUNT = 36_000;
+export const HAY_COUNT = 64_000;
 
 export interface HayPoint {
   x: number;
