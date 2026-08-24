@@ -137,6 +137,7 @@ export class HaywireGame {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
     host.append(this.renderer.domElement);
+    this.resize();
     this.createWorld();
     this.bindEvents();
     this.animate();
@@ -644,6 +645,8 @@ export class HaywireGame {
 
   private bindEvents(): void {
     window.addEventListener('resize', () => this.resize());
+    window.visualViewport?.addEventListener('resize', () => this.resize());
+    new ResizeObserver(() => this.resize()).observe(this.host);
     window.addEventListener('keydown', (event) => {
       if (event.code === 'Space' && this.playing) {
         event.preventDefault();
@@ -676,10 +679,13 @@ export class HaywireGame {
   }
 
   private resize(): void {
-    this.camera.aspect = window.innerWidth / window.innerHeight;
+    const bounds = this.host.getBoundingClientRect();
+    const width = Math.max(1, Math.round(bounds.width || window.innerWidth));
+    const height = Math.max(1, Math.round(bounds.height || window.innerHeight));
+    this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
-    this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, window.innerWidth < 700 ? 1.25 : 1.65));
+    this.renderer.setSize(width, height, false);
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, width < 700 ? 1.25 : 1.65));
   }
 
   enterRoom(room: RoomSnapshot, playerId: string): void {

@@ -2,19 +2,23 @@
 
 :root { color-scheme: dark; font-family: 'Manrope', sans-serif; --acid:#dfff48; --ink:#0c0d0b; --panel:rgba(18,19,15,.86); --line:rgba(255,255,255,.16); }
 * { box-sizing:border-box; }
-html, body, #app, #shell { width:100%; min-height:100%; margin:0; }
+html, body, #app, #shell { width:100%; height:100%; min-width:100%; min-height:100%; margin:0; }
+html { background:#12120e; }
 body { background:#12120e; color:#f5f1e8; overflow-x:hidden; }
+#app,#shell { position:relative; min-height:100dvh; }
+body.playing { width:100vw; height:100dvh; overflow:hidden; }
+body.playing #app,body.playing #shell { width:100vw; height:100dvh; min-height:0; overflow:hidden; }
 button, input { font:inherit; }
 button { color:inherit; }
-#world { position:fixed; inset:0; z-index:0; background:#15150f; }
-#world canvas { width:100%; height:100%; display:block; }
+#world { position:fixed; inset:0; width:100vw; height:100dvh; z-index:0; overflow:hidden; background:#15150f; }
+#world canvas { width:100%!important; height:100%!important; display:block; }
 .grain { position:fixed; inset:0; z-index:2; opacity:.085; pointer-events:none; background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.95' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.8'/%3E%3C/svg%3E"); }
 .vignette { position:fixed; inset:0; z-index:1; pointer-events:none; background:radial-gradient(circle at 50% 44%,transparent 20%,rgba(0,0,0,.16) 65%,rgba(0,0,0,.65)); }
 .screen { position:relative; z-index:3; transition:opacity .35s, visibility .35s; }
 .hidden { opacity:0!important; visibility:hidden!important; pointer-events:none!important; }
 button { cursor:pointer; border:0; }
 
-#lobby { min-height:100vh; background:linear-gradient(90deg,rgba(9,10,8,.93) 0%,rgba(9,10,8,.79) 40%,rgba(9,10,8,.18) 72%,rgba(9,10,8,.4)); }
+#lobby { width:100%; min-height:100dvh; background:linear-gradient(90deg,rgba(9,10,8,.93) 0%,rgba(9,10,8,.79) 40%,rgba(9,10,8,.18) 72%,rgba(9,10,8,.4)); }
 .lobby-nav { height:84px; padding:0 clamp(24px,4vw,76px); display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--line); }
 .mini-logo,.game-brand { color:#fff; text-decoration:none; font:700 16px 'Unbounded'; letter-spacing:.1em; display:flex; align-items:center; gap:12px; }
 .mini-logo i,.game-brand i { width:25px; height:25px; display:block; background:var(--acid); clip-path:polygon(0 7%,100% 0,58% 43%,100% 100%,0 92%,43% 51%); }
@@ -23,7 +27,7 @@ button { cursor:pointer; border:0; }
 #connection b { width:7px;height:7px;border-radius:50%;background:#d65b47;box-shadow:0 0 10px #d65b47; }
 #connection.online b { background:var(--acid);box-shadow:0 0 10px var(--acid); }
 .text-button { background:none; text-transform:uppercase; font-size:11px; letter-spacing:.12em; padding:12px 0; border-bottom:1px solid rgba(255,255,255,.4); }
-.hero-grid { min-height:calc(100vh - 84px); padding:clamp(54px,7vh,110px) clamp(24px,4vw,76px) 54px; display:grid; grid-template-columns:minmax(0,1fr) minmax(360px,470px); gap:8vw; align-items:center; }
+.hero-grid { min-height:calc(100dvh - 84px); padding:clamp(54px,7vh,110px) clamp(24px,4vw,76px) 54px; display:grid; grid-template-columns:minmax(0,1fr) minmax(360px,470px); gap:8vw; align-items:center; }
 .hero-copy { max-width:830px; }
 .eyebrow { margin:0 0 26px; font-weight:700; font-size:11px; letter-spacing:.17em; color:#c6c3b8; }
 .eyebrow span { display:inline-grid; place-items:center; width:27px;height:27px;margin-right:10px;border-radius:50%;background:var(--acid);color:#111; }
@@ -75,7 +79,7 @@ button { cursor:pointer; border:0; }
 .room-card>b { font-size:20px; }
 .empty-room { grid-column:1/-1;padding:35px;border:1px dashed rgba(255,255,255,.15);color:#807e76;text-align:center; }
 
-#hud { position:fixed;inset:0;pointer-events:none; }
+#hud { position:fixed;inset:0;width:100vw;height:100dvh;overflow:hidden;pointer-events:none; }
 #hud button,#hud input,#chat { pointer-events:auto; }
 .game-topbar { height:72px;padding:0 26px;display:flex;align-items:center;justify-content:space-between;background:linear-gradient(180deg,rgba(0,0,0,.55),transparent); }
 .round-info { position:absolute;left:50%;top:16px;transform:translateX(-50%);display:flex;align-items:baseline;gap:14px; }
