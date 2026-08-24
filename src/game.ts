@@ -1,13 +1,14 @@
 import * as THREE from 'three';
 import type { ActionEvent, PlayerState, RoomSnapshot, Vec3State } from './shared/protocol';
+import { HAY_COUNT, HAY_RADIUS, mulberry32, needlePosition, surfaceHeight } from './shared/hay';
 
 const PLAYER_HEIGHT = 1.62;
-const HAY_RADIUS = 9.2;
 const ARENA_RADIUS = 15.5;
 
 interface GameCallbacks {
   onMove: (position: Vec3State, yaw: number) => void;
   onSearch: () => void;
+  onPullStraw: (instanceId: number) => void;
   onAction: (type: 'sneeze' | 'magnet') => void;
   onGooseHit: () => void;
 }
@@ -30,31 +31,12 @@ interface Pulse {
   duration: number;
 }
 
-function mulberry32(seed: number): () => number {
-  return () => {
-    let value = (seed += 0x6d2b79f5);
-    value = Math.imul(value ^ (value >>> 15), value | 1);
-    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
-    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-function surfaceHeight(x: number, z: number): number {
-  const r = Math.hypot(x, z);
-  if (r >= HAY_RADIUS) return 0;
-  const normalized = r / HAY_RADIUS;
-  const mound = 4.7 * Math.pow(1 - normalized * normalized, 0.72);
-  const ripple = Math.sin(x * 1.7) * Math.cos(z * 1.4) * 0.11 * (1 - normalized);
-  return Math.max(0, mound + ripple);
-}
-
-function needlePosition(seed: number): THREE.Vector3 {
-  const random = mulberry32(seed ^ 0x51e2d);
-  const angle = random() * Math.PI * 2;
-  const radius = 1.2 + Math.sqrt(random()) * 7.25;
-  const x = Math.cos(angle) * radius;
-  const z = Math.sin(angle) * radius;
-  return new THREE.Vector3(x, surfaceHeight(x, z) + 0.16, z);
+interface DynamicStraw {
+  mesh: THREE.Mesh<THREE.CylinderGeometry, THREE.MeshStandardMaterial>;
+  velocity: THREE.Vector3;
+  spin: THREE.Vector3;
+  age: number;
+  settled: boolean;
 }
 
 export class HaywireGame {
@@ -77,9 +59,16 @@ export class HaywireGame {
   readonly avatarPalette: Record<string, number> = {
     rust: 0xff6b35, lime: 0xd8ff53, sky: 0x57c7ff, pink: 0xff77b7, cream: 0xffe4ae, violet: 0x9b7bff,
   };
+  readonly hayOriginalMatrices: THREE.Matrix4[] = [];
+  readonly pulledStrawIds = new Set<number>();
+  readonly dynamicStraws: DynamicStraw[] = [];
+
+  hay!: THREE.InstancedMesh<THREE.CylinderGeometry, THREE.MeshStandardMaterial>;
+  hayGeometry!: THREE.CylinderGeometry;
+  dynamicHayMaterial!: THREE.MeshStandardMaterial;
 
   yaw = Math.PI;
-  pitch = -0.08;
+  pitch = -0.2;
   playing = false;
   localPlayerId = '';
   roundSeed = 0;
@@ -89,6 +78,8 @@ export class HaywireGame {
   footstep = 0;
   currentFov = 68;
   attractAngle = 0;
+  pulling = false;
+  lastInteraction = 0;
 
   constructor(host: HTMLDivElement, callbacks: GameCallbacks) {
     this.host = host;
@@ -239,7 +230,7 @@ export class HaywireGame {
   }
 
   private createHaystack(): void {
-    const geometry = new THREE.BoxGeometry(0.023, 0.023, 0.68);
+    const geometry = new THREE.CylinderGeometry(0.012, 0.018, 0.72, 5, 1);
     geometry.computeVertexNormals();
     const material = new THREE.MeshStandardMaterial({
       color: 0xffffff,
@@ -249,44 +240,45 @@ export class HaywireGame {
       emissive: 0x7a3c0b,
       emissiveIntensity: 0.28,
     });
-    const count = window.innerWidth < 700 ? 14000 : 30000;
-    const hay = new THREE.InstancedMesh(geometry, material, count);
+    const hay = new THREE.InstancedMesh(geometry, material, HAY_COUNT);
     const random = mulberry32(0x5eed123);
     const dummy = new THREE.Object3D();
     const colors = [new THREE.Color(0xe1a43b), new THREE.Color(0xb87423), new THREE.Color(0xf5c75d), new THREE.Color(0x986022), new THREE.Color(0xce8628)];
-    for (let i = 0; i < count; i += 1) {
+    for (let i = 0; i < HAY_COUNT; i += 1) {
       const angle = random() * Math.PI * 2;
       const radius = Math.sqrt(random()) * HAY_RADIUS;
       const x = Math.cos(angle) * radius;
       const z = Math.sin(angle) * radius;
       const height = surfaceHeight(x, z);
-      const nearSurface = i < count * 0.82;
-      const y = nearSurface ? height - random() * 0.58 : random() * height;
+      const nearSurface = random() < 0.52;
+      const y = nearSurface ? height - random() * 0.46 : 0.06 + random() * Math.max(0.08, height - 0.06);
       dummy.position.set(x + (random() - 0.5) * 0.18, Math.max(0.045, y), z + (random() - 0.5) * 0.18);
-      dummy.rotation.set((random() - 0.5) * 0.95, random() * Math.PI, (random() - 0.5) * 0.95);
+      dummy.rotation.set(Math.PI / 2 + (random() - 0.5) * 0.9, random() * Math.PI, (random() - 0.5) * 1.1);
       const scale = 0.72 + random() * 0.78;
       dummy.scale.set(scale, scale, scale);
       dummy.updateMatrix();
       hay.setMatrixAt(i, dummy.matrix);
+      this.hayOriginalMatrices.push(dummy.matrix.clone());
       const color = colors[Math.floor(random() * colors.length)].clone().multiplyScalar(0.88 + random() * 0.24);
       hay.setColorAt(i, color);
     }
     hay.instanceMatrix.needsUpdate = true;
     if (hay.instanceColor) hay.instanceColor.needsUpdate = true;
-    // The dense pile receives the arena shadow, but self-shadowing 30k crossed
+    // The dense pile receives the arena shadow, but self-shadowing 36k crossed
     // slivers turns the surface into a black thicket on lower-end WebGL GPUs.
     hay.castShadow = false;
     hay.receiveShadow = true;
+    hay.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    hay.frustumCulled = false;
     this.scene.add(hay);
-
-    const core = new THREE.Mesh(
-      new THREE.IcosahedronGeometry(8.67, 5),
-      new THREE.MeshStandardMaterial({ color: 0x9e661f, roughness: 1, emissive: 0x291204, emissiveIntensity: 0.12 }),
-    );
-    core.scale.y = 0.42;
-    core.position.y = 0.18;
-    core.receiveShadow = true;
-    this.scene.add(core);
+    this.hay = hay;
+    this.hayGeometry = geometry;
+    this.dynamicHayMaterial = new THREE.MeshStandardMaterial({
+      color: 0xc18129,
+      roughness: 0.92,
+      emissive: 0x582508,
+      emissiveIntensity: 0.18,
+    });
   }
 
   private createNeedle(): void {
@@ -296,22 +288,28 @@ export class HaywireGame {
       roughness: 0.12,
       clearcoat: 1,
       emissive: 0x8dc7df,
-      emissiveIntensity: 0.22,
+      emissiveIntensity: 0.08,
     });
-    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.035, 0.95, 10), metal);
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.011, 0.48, 8), metal);
     shaft.rotation.z = Math.PI / 2;
     shaft.castShadow = true;
-    const eye = new THREE.Mesh(new THREE.TorusGeometry(0.085, 0.02, 8, 16), metal);
+    const eye = new THREE.Mesh(new THREE.TorusGeometry(0.026, 0.006, 7, 14), metal);
     eye.rotation.y = Math.PI / 2;
-    eye.position.x = -0.48;
+    eye.position.x = -0.25;
     const glintMaterial = new THREE.SpriteMaterial({ color: 0xc9f8ff, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending });
     const glint = new THREE.Sprite(glintMaterial);
-    glint.scale.set(0.35, 0.35, 0.35);
-    glint.position.x = 0.28;
+    glint.scale.set(0.07, 0.07, 0.07);
+    glint.position.x = 0.12;
     glint.name = 'glint';
-    this.needle.add(shaft, eye, glint);
+    const hitbox = new THREE.Mesh(
+      new THREE.BoxGeometry(0.58, 0.12, 0.12),
+      new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }),
+    );
+    hitbox.name = 'needle-hitbox';
+    this.needle.add(shaft, eye, glint, hitbox);
     this.needle.rotation.set(0.15, 0.3, -0.18);
-    this.needle.position.copy(needlePosition(0));
+    const initial = needlePosition(0);
+    this.needle.position.set(initial.x, initial.y, initial.z);
     this.scene.add(this.needle);
   }
 
@@ -357,10 +355,12 @@ export class HaywireGame {
       if (!this.playing) return;
       if (document.pointerLockElement !== this.renderer.domElement) return this.requestControl();
       if (event.button === 0) {
-        this.callbacks.onSearch();
-        this.createPulse(this.localPosition, 0xf4f0da, 1.1);
+        this.pulling = true;
+        this.interact();
       }
     });
+    window.addEventListener('mouseup', (event) => { if (event.button === 0) this.pulling = false; });
+    window.addEventListener('blur', () => { this.pulling = false; });
   }
 
   private resize(): void {
@@ -379,7 +379,10 @@ export class HaywireGame {
       this.localPosition.set(local.position.x, 0, local.position.z);
       this.yaw = local.yaw;
     }
+    this.placeCameraAtPlayer();
+    this.resetHay();
     this.setNeedle(room.seed);
+    room.pulledStraws.forEach((instanceId) => this.pullStraw(instanceId, undefined, false));
     this.clearRemotes();
     room.players.forEach((player) => this.upsertPlayer(player));
   }
@@ -388,20 +391,28 @@ export class HaywireGame {
     this.playing = false;
     this.localPlayerId = '';
     this.clearRemotes();
+    this.resetHay();
     this.releaseControl();
   }
 
   syncRoom(room: RoomSnapshot): void {
-    if (room.seed !== this.roundSeed) this.setNeedle(room.seed);
+    if (room.seed !== this.roundSeed) {
+      this.resetHay();
+      this.setNeedle(room.seed);
+    }
+    room.pulledStraws.forEach((instanceId) => this.pullStraw(instanceId, undefined, false));
     const ids = new Set(room.players.map((player) => player.id));
     for (const id of this.remotes.keys()) if (!ids.has(id)) this.removePlayer(id);
     room.players.forEach((player) => this.upsertPlayer(player));
   }
 
-  resetRound(seed: number, players: PlayerState[], localPlayerId: string): void {
+  resetRound(seed: number, players: PlayerState[], localPlayerId: string, pulledStraws: number[] = []): void {
+    this.resetHay();
     this.setNeedle(seed);
+    pulledStraws.forEach((instanceId) => this.pullStraw(instanceId, undefined, false));
     const local = players.find((player) => player.id === localPlayerId);
     if (local) this.localPosition.set(local.position.x, 0, local.position.z);
+    this.placeCameraAtPlayer();
     this.clearRemotes();
     players.forEach((player) => this.upsertPlayer(player));
     this.createBurst(new THREE.Vector3(0, 3, 0), 260, 0xdfff48);
@@ -409,10 +420,20 @@ export class HaywireGame {
 
   private setNeedle(seed: number): void {
     this.roundSeed = seed;
-    this.needle.position.copy(needlePosition(seed));
+    const position = needlePosition(seed);
+    this.needle.position.set(position.x, position.y, position.z);
     const random = mulberry32(seed);
     this.needle.rotation.set((random() - 0.5) * 0.65, random() * Math.PI, (random() - 0.5) * 0.5);
     this.needle.visible = true;
+  }
+
+  private placeCameraAtPlayer(): void {
+    const ground = surfaceHeight(this.localPosition.x, this.localPosition.z);
+    this.localPosition.y = ground;
+    this.camera.position.set(this.localPosition.x, ground + PLAYER_HEIGHT, this.localPosition.z);
+    this.camera.rotation.order = 'YXZ';
+    this.camera.rotation.set(this.pitch, this.yaw, 0);
+    this.camera.updateMatrixWorld(true);
   }
 
   upsertPlayer(player: PlayerState): void {
@@ -508,6 +529,98 @@ export class HaywireGame {
     this.virtualMove.set(x, y);
   }
 
+  interact(): void {
+    if (!this.playing || performance.now() - this.lastInteraction < 95) return;
+    this.lastInteraction = performance.now();
+    this.camera.updateMatrixWorld(true);
+    this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
+    const reach = 7.5;
+    this.raycaster.far = reach;
+    const hit = this.raycaster.intersectObject(this.needle, true)[0];
+    const approximate = this.approximateStrawHit(reach);
+
+    if (approximate && (!hit || approximate.distance < hit.distance)) {
+      this.callbacks.onPullStraw(approximate.instanceId);
+      return;
+    }
+    if (!hit || hit.distance > reach) return;
+    this.callbacks.onSearch();
+    this.createPulse(this.localPosition, 0xf4f0da, 1.1);
+  }
+
+  private approximateStrawHit(maxDistance: number): { instanceId: number; distance: number } | null {
+    const origin = this.raycaster.ray.origin;
+    const direction = this.raycaster.ray.direction;
+    let bestDistance = maxDistance;
+    let bestInstance = -1;
+    for (let instanceId = 0; instanceId < this.hayOriginalMatrices.length; instanceId += 1) {
+      if (this.pulledStrawIds.has(instanceId)) continue;
+      const elements = this.hayOriginalMatrices[instanceId].elements;
+      const x = elements[12] - origin.x;
+      const y = elements[13] - origin.y;
+      const z = elements[14] - origin.z;
+      const distance = x * direction.x + y * direction.y + z * direction.z;
+      if (distance < 0.15 || distance >= maxDistance) continue;
+      const perpendicularSq = x * x + y * y + z * z - distance * distance;
+      if (distance >= bestDistance) continue;
+      if (perpendicularSq <= 0.09) {
+        bestDistance = distance;
+        bestInstance = instanceId;
+      }
+    }
+    return bestInstance >= 0 ? { instanceId: bestInstance, distance: bestDistance } : null;
+  }
+
+  pullStraw(instanceId: number, playerId?: string, animate = true): void {
+    if (!Number.isInteger(instanceId) || instanceId < 0 || instanceId >= this.hayOriginalMatrices.length) return;
+    if (this.pulledStrawIds.has(instanceId)) return;
+    this.pulledStrawIds.add(instanceId);
+
+    const hidden = new THREE.Matrix4().compose(
+      new THREE.Vector3(0, -100, 0),
+      new THREE.Quaternion(),
+      new THREE.Vector3(0, 0, 0),
+    );
+    this.hay.setMatrixAt(instanceId, hidden);
+    this.hay.instanceMatrix.needsUpdate = true;
+    if (!animate) return;
+
+    const mesh = new THREE.Mesh(this.hayGeometry, this.dynamicHayMaterial);
+    this.hayOriginalMatrices[instanceId].decompose(mesh.position, mesh.quaternion, mesh.scale);
+    const source = playerId === this.localPlayerId
+      ? this.camera.position
+      : this.remotes.get(playerId ?? '')?.group.position ?? this.camera.position;
+    const velocity = source.clone().sub(mesh.position).setY(0.65).normalize().multiplyScalar(3.1 + Math.random() * 1.7);
+    velocity.y += 1.2 + Math.random() * 1.4;
+    const spin = new THREE.Vector3(
+      (Math.random() - 0.5) * 12,
+      (Math.random() - 0.5) * 12,
+      (Math.random() - 0.5) * 12,
+    );
+    mesh.castShadow = true;
+    this.scene.add(mesh);
+    this.dynamicStraws.push({ mesh, velocity, spin, age: 0, settled: false });
+    while (this.dynamicStraws.length > 360) this.removeDynamicStraw(0);
+  }
+
+  private resetHay(): void {
+    if (!this.hay) return;
+    for (const instanceId of this.pulledStrawIds) {
+      const matrix = this.hayOriginalMatrices[instanceId];
+      if (matrix) this.hay.setMatrixAt(instanceId, matrix);
+    }
+    this.hay.instanceMatrix.needsUpdate = true;
+    this.pulledStrawIds.clear();
+    while (this.dynamicStraws.length) this.removeDynamicStraw(this.dynamicStraws.length - 1);
+  }
+
+  private removeDynamicStraw(index: number): void {
+    const straw = this.dynamicStraws[index];
+    if (!straw) return;
+    this.scene.remove(straw.mesh);
+    this.dynamicStraws.splice(index, 1);
+  }
+
   playLocalAction(type: 'sneeze' | 'magnet'): void {
     if (type === 'sneeze') {
       this.createBurst(this.localPosition.clone().add(new THREE.Vector3(0, 1.1, 0)), 150, 0xe3ae4c);
@@ -590,6 +703,33 @@ export class HaywireGame {
     }
   }
 
+  private updateDynamicStraws(delta: number): void {
+    const rotation = new THREE.Quaternion();
+    for (let index = this.dynamicStraws.length - 1; index >= 0; index -= 1) {
+      const straw = this.dynamicStraws[index];
+      straw.age += delta;
+      if (!straw.settled) {
+        straw.velocity.y -= 8.8 * delta;
+        straw.mesh.position.addScaledVector(straw.velocity, delta);
+        rotation.setFromEuler(new THREE.Euler(straw.spin.x * delta, straw.spin.y * delta, straw.spin.z * delta));
+        straw.mesh.quaternion.multiply(rotation).normalize();
+        straw.velocity.multiplyScalar(Math.pow(0.985, delta * 60));
+
+        const radius = Math.hypot(straw.mesh.position.x, straw.mesh.position.z);
+        const floor = radius < HAY_RADIUS ? surfaceHeight(straw.mesh.position.x, straw.mesh.position.z) + 0.05 : 0.055;
+        if (straw.mesh.position.y <= floor && straw.velocity.y < 0) {
+          straw.mesh.position.y = floor;
+          straw.velocity.y *= -0.18;
+          straw.velocity.x *= 0.64;
+          straw.velocity.z *= 0.64;
+          straw.spin.multiplyScalar(0.58);
+          if (straw.velocity.lengthSq() < 0.18) straw.settled = true;
+        }
+      }
+      if (straw.age > (straw.settled ? 8 : 14)) this.removeDynamicStraw(index);
+    }
+  }
+
   private updatePlayer(delta: number, elapsed: number): void {
     const forwardInput = (this.keys.has('KeyW') || this.keys.has('ArrowUp') ? 1 : 0) - (this.keys.has('KeyS') || this.keys.has('ArrowDown') ? 1 : 0) - this.virtualMove.y;
     const sideInput = (this.keys.has('KeyD') || this.keys.has('ArrowRight') ? 1 : 0) - (this.keys.has('KeyA') || this.keys.has('ArrowLeft') ? 1 : 0) + this.virtualMove.x;
@@ -644,7 +784,10 @@ export class HaywireGame {
     requestAnimationFrame(this.animate);
     const delta = Math.min(this.clock.getDelta(), 0.05);
     const elapsed = this.clock.elapsedTime;
-    if (this.playing) this.updatePlayer(delta, elapsed);
+    if (this.playing) {
+      this.updatePlayer(delta, elapsed);
+      if (this.pulling && performance.now() - this.lastInteraction >= 115) this.interact();
+    }
     else {
       this.attractAngle += delta * 0.065;
       const radius = 15.5 + Math.sin(elapsed * 0.17) * 1.7;
@@ -653,6 +796,7 @@ export class HaywireGame {
     }
     this.updateGoose(delta, elapsed);
     this.updateBursts(delta);
+    this.updateDynamicStraws(delta);
     for (const remote of this.remotes.values()) {
       remote.group.position.lerp(remote.target, 1 - Math.exp(-delta * 9));
       let angleDelta = remote.targetYaw - remote.group.rotation.y;
@@ -665,7 +809,7 @@ export class HaywireGame {
     if (glint) {
       const pulse = 0.45 + Math.pow(Math.max(0, Math.sin(elapsed * 2.4)), 12) * 1.2;
       glint.material.opacity = pulse;
-      glint.scale.setScalar(0.22 + pulse * 0.22);
+      glint.scale.setScalar(0.035 + pulse * 0.028);
     }
     this.sun.position.x = -13 + Math.sin(elapsed * 0.03) * 3;
     this.renderer.render(this.scene, this.camera);

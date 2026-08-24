@@ -1,6 +1,7 @@
 import { io, type Socket } from 'socket.io-client';
 import './styles.css';
 import { HaywireGame } from './game';
+import { repairMojibake } from './shared/encoding';
 import type {
   ActionEvent,
   AvatarId,
@@ -44,7 +45,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
             <div><strong>∞</strong><span>соломинок*</span></div>
             <div><strong>1</strong><span>подлая игла</span></div>
           </div>
-          <small>* видеокарта считает, что около тридцати тысяч</small>
+          <small>* видеокарта считает, что около тридцати шести тысяч</small>
         </div>
 
         <div class="join-card">
@@ -82,14 +83,14 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <div id="player-list"></div>
       </aside>
       <div id="crosshair" class="crosshair"><i></i><i></i><span></span></div>
-      <div class="objective"><span>ТЕКУЩАЯ ЗАДАЧА</span><strong>Найди одну иглу</strong><small>Нажми ЛКМ рядом с ней</small></div>
+      <div class="objective"><span>ТЕКУЩАЯ ЗАДАЧА</span><strong>Разбирай стог по соломинке</strong><small id="straw-count">Вытащено: 0 · игла спрятана внутри</small></div>
       <div id="magnet-readout" class="magnet-readout hidden"><span>МАГНИТНЫЙ ИМПУЛЬС</span><strong>???</strong><i></i><small>направление на иглу</small></div>
       <div id="event-banner" class="event-banner hidden"><span></span><strong></strong><small></small></div>
       <div id="toast" class="toast hidden"></div>
       <div class="action-dock">
         <button id="sneeze-action" data-key="Q"><i>💨</i><span><b>ЧИХ-БОМБА</b><small>разбросать солому</small></span><kbd>Q</kbd><em></em></button>
         <button id="magnet-action" data-key="E"><i>🧲</i><span><b>МАГНИТ</b><small>узнать направление</small></span><kbd>E</kbd><em></em></button>
-        <button id="search-action" data-key="ЛКМ"><i>✦</i><span><b>ПРОВЕРИТЬ</b><small>схватить подозрительное</small></span><kbd>ЛКМ</kbd></button>
+        <button id="search-action" data-key="ЛКМ"><i>✦</i><span><b>ВЫТАЩИТЬ</b><small>одну соломинку</small></span><kbd>ЛКМ</kbd></button>
       </div>
       <div class="controls-hint"><span>WASD ДВИЖЕНИЕ</span><span>SHIFT БЕГ</span><span>ESC КУРСОР</span></div>
       <section id="chat" class="chat-panel">
@@ -118,9 +119,9 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <p class="eyebrow"><span>?</span> ПОЛЕВАЯ ИНСТРУКЦИЯ</p>
       <h2>Это правда игла в стоге</h2>
       <div class="how-grid">
-        <article><b>01</b><h3>Копайся</h3><p>Ходи по объёмному стогу, рассматривай соломинки и ищи металлический блеск.</p></article>
+        <article><b>01</b><h3>Разбирай</h3><p>Наводи прицел и вытаскивай соломинки по одной. Они общие для всей комнаты и физически вылетают из стога.</p></article>
         <article><b>02</b><h3>Рискуй</h3><p>Магнит покажет направление, но выдаст всем твою активность. Чих разметает обзор.</p></article>
-        <article><b>03</b><h3>Побеждай</h3><p>Подойди к игле и нажми ЛКМ. Сервер проверит расстояние и запишет очко.</p></article>
+        <article><b>03</b><h3>Побеждай</h3><p>Тонкая игла лежит внутри объёма. Раскопай её, наведи прицел и вытащи раньше остальных.</p></article>
       </div>
       <div class="warning">⚠ Гусь не является багом. Гусь — это менеджмент.</div>
     </dialog>
@@ -132,6 +133,7 @@ const world = document.querySelector<HTMLDivElement>('#world')!;
 const game = new HaywireGame(world, {
   onMove: (position, yaw) => socket.emit('move', position, yaw),
   onSearch: () => socket.emit('search'),
+  onPullStraw: (instanceId) => socket.emit('pullStraw', instanceId),
   onAction: (type) => triggerAction(type),
   onGooseHit: () => socket.emit('action', 'goose'),
 });
@@ -145,10 +147,13 @@ const cooldowns = new Map<'sneeze' | 'magnet', number>();
 
 const $ = <T extends Element>(selector: string) => document.querySelector<T>(selector)!;
 const nameInput = $('#player-name') as HTMLInputElement;
-nameInput.value = localStorage.getItem('haywire-name') || '';
+const storedName = localStorage.getItem('haywire-name') || '';
+const repairedName = repairMojibake(storedName);
+nameInput.value = repairedName;
+if (repairedName !== storedName) localStorage.setItem('haywire-name', repairedName);
 
 function identity() {
-  const playerName = nameInput.value.trim() || `Сенокосец ${Math.floor(100 + Math.random() * 900)}`;
+  const playerName = repairMojibake(nameInput.value.trim()) || `Сенокосец ${Math.floor(100 + Math.random() * 900)}`;
   nameInput.value = playerName;
   localStorage.setItem('haywire-name', playerName);
   return { playerName, avatar: selectedAvatar };
@@ -214,6 +219,7 @@ function updateRoomUi(): void {
   $('#hud-room-code').textContent = room.id;
   $('#player-count').textContent = `${room.players.length} / ${room.capacity}`;
   $('#round-info span').textContent = `РАУНД ${room.round}`;
+  $('#straw-count').textContent = `Вытащено: ${room.pulledStraws.length.toLocaleString('ru-RU')} · игла спрятана внутри`;
   const list = $('#player-list');
   list.replaceChildren();
   [...room.players].sort((a, b) => b.score - a.score).forEach((player, index) => {
@@ -312,6 +318,12 @@ socket.on('playerMoved', (player) => game.movePlayer(player));
 socket.on('chat', addChat);
 socket.on('toast', showToast);
 socket.on('action', (action) => { showEvent(action); game.playNetworkAction(action); });
+socket.on('strawPulled', (event) => {
+  if (!room) return;
+  if (!room.pulledStraws.includes(event.instanceId)) room.pulledStraws.push(event.instanceId);
+  game.pullStraw(event.instanceId, event.playerId);
+  $('#straw-count').textContent = `Вытащено: ${room.pulledStraws.length.toLocaleString('ru-RU')} · игла спрятана внутри`;
+});
 socket.on('magnetResult', (result) => {
   const readout = $('#magnet-readout');
   readout.querySelector('strong')!.textContent = `${result.distance.toFixed(1)} М · ${result.strength.toUpperCase()}`;
@@ -322,7 +334,7 @@ socket.on('magnetResult', (result) => {
 socket.on('roundReset', (state) => {
   if (!room) return;
   room = { ...room, ...state };
-  game.resetRound(state.seed, state.players, localPlayerId);
+  game.resetRound(state.seed, state.players, localPlayerId, state.pulledStraws);
   updateRoomUi();
 });
 
@@ -356,7 +368,7 @@ $('#leave-button').addEventListener('click', () => {
 });
 $('#sneeze-action').addEventListener('click', () => triggerAction('sneeze'));
 $('#magnet-action').addEventListener('click', () => triggerAction('magnet'));
-$('#search-action').addEventListener('click', () => socket.emit('search'));
+$('#search-action').addEventListener('click', () => game.interact());
 $('#chat-toggle').addEventListener('click', () => $('#chat').classList.toggle('collapsed'));
 $('#chat-form').addEventListener('submit', (event) => {
   event.preventDefault();
@@ -389,7 +401,7 @@ joystick.addEventListener('pointermove', (event) => {
 joystick.addEventListener('pointerup', () => { joystickPointer = null; game.setVirtualMove(0, 0); (joystick.firstElementChild as HTMLElement).style.transform = ''; });
 document.querySelectorAll<HTMLButtonElement>('[data-mobile-action]').forEach((button) => button.addEventListener('click', () => {
   const action = button.dataset.mobileAction;
-  if (action === 'search') socket.emit('search'); else triggerAction(action as 'sneeze' | 'magnet');
+  if (action === 'search') game.interact(); else triggerAction(action as 'sneeze' | 'magnet');
 }));
 
 window.setInterval(() => {

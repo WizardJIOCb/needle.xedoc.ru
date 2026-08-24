@@ -1,4 +1,8 @@
 import type { AvatarId, PlayerState, RoomSnapshot, RoomSummary, Vec3State } from '../src/shared/protocol.js';
+import { repairMojibake } from '../src/shared/encoding.js';
+import { needlePosition, surfaceHeight } from '../src/shared/hay.js';
+
+export { needlePosition, surfaceHeight };
 
 export const MAX_PLAYERS = 8;
 export const ROUND_MS = 3 * 60 * 1000;
@@ -11,12 +15,13 @@ export interface RoomState {
   round: number;
   roundEndsAt: number;
   seed: number;
+  pulledStraws: Set<number>;
   resetTimer?: NodeJS.Timeout;
   roundTimer?: NodeJS.Timeout;
 }
 
 export function safeText(value: unknown, maxLength: number, fallback = ''): string {
-  const text = typeof value === 'string' ? value.replace(/[<>\u0000-\u001f]/g, '').trim() : '';
+  const text = typeof value === 'string' ? repairMojibake(value).replace(/[<>\u0000-\u001f]/g, '').trim() : '';
   return text.slice(0, maxLength) || fallback;
 }
 
@@ -33,8 +38,9 @@ export function createPlayer(id: string, name: string, avatar: AvatarId): Player
     id,
     name: safeText(name, 18, 'Сенокосец'),
     avatar,
-    position: { x: Math.cos(angle) * 12, y: 0, z: Math.sin(angle) * 12 },
-    yaw: angle + Math.PI,
+    position: { x: Math.cos(angle) * 10.4, y: 0, z: Math.sin(angle) * 10.4 },
+    // Camera forward is (-sin(yaw), -cos(yaw)); face the arena centre.
+    yaw: Math.PI / 2 - angle,
     score: 0,
     joinedAt: Date.now(),
   };
@@ -48,6 +54,7 @@ export function createRoom(name: string): RoomState {
     round: 1,
     roundEndsAt: Date.now() + ROUND_MS,
     seed: Math.floor(Math.random() * 2_000_000_000),
+    pulledStraws: new Set(),
   };
 }
 
@@ -64,6 +71,7 @@ export function snapshot(room: RoomState): RoomSnapshot {
     round: room.round,
     roundEndsAt: room.roundEndsAt,
     seed: room.seed,
+    pulledStraws: [...room.pulledStraws],
   };
 }
 
@@ -73,33 +81,6 @@ export function clampPosition(position: Vec3State): Vec3State {
   const length = Math.hypot(x, z);
   const scale = length > ARENA_RADIUS ? ARENA_RADIUS / length : 1;
   return { x: x * scale, y: 0, z: z * scale };
-}
-
-export function mulberry32(seed: number): () => number {
-  return () => {
-    let value = (seed += 0x6d2b79f5);
-    value = Math.imul(value ^ (value >>> 15), value | 1);
-    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
-    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-export function surfaceHeight(x: number, z: number): number {
-  const r = Math.hypot(x, z);
-  if (r >= 9.2) return 0;
-  const normalized = r / 9.2;
-  const mound = 4.7 * Math.pow(1 - normalized * normalized, 0.72);
-  const ripple = Math.sin(x * 1.7) * Math.cos(z * 1.4) * 0.11 * (1 - normalized);
-  return Math.max(0, mound + ripple);
-}
-
-export function needlePosition(seed: number): Vec3State {
-  const random = mulberry32(seed ^ 0x51e2d);
-  const angle = random() * Math.PI * 2;
-  const radius = 1.2 + Math.sqrt(random()) * 7.25;
-  const x = Math.cos(angle) * radius;
-  const z = Math.sin(angle) * radius;
-  return { x, y: surfaceHeight(x, z) + 0.12, z };
 }
 
 export function distanceToNeedle(room: RoomState, player: PlayerState): number {

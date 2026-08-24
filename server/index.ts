@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { Server } from 'socket.io';
+import { HAY_COUNT, needlePosition } from '../src/shared/hay.js';
 import type {
   ActionEvent,
   AvatarId,
@@ -100,18 +101,20 @@ function nextRound(room: RoomState): void {
   if (room.roundTimer) clearTimeout(room.roundTimer);
   room.round += 1;
   room.seed = Math.floor(Math.random() * 2_000_000_000);
+  room.pulledStraws.clear();
   room.roundEndsAt = Date.now() + ROUND_MS;
   room.resetTimer = undefined;
   room.roundTimer = undefined;
   for (const player of room.players.values()) {
     const angle = Math.random() * Math.PI * 2;
-    player.position = { x: Math.cos(angle) * 12, y: 0, z: Math.sin(angle) * 12 };
+    player.position = { x: Math.cos(angle) * 10.4, y: 0, z: Math.sin(angle) * 10.4 };
   }
   io.to(room.id).emit('roundReset', {
     round: room.round,
     roundEndsAt: room.roundEndsAt,
     seed: room.seed,
     players: [...room.players.values()],
+    pulledStraws: [],
   });
   systemMessage(room.id, `Раунд ${room.round}. Новая игла уже где-то там. Да, мы тоже её потеряли.`);
   scheduleRound(room);
@@ -206,6 +209,16 @@ io.on('connection', (socket) => {
     });
   });
 
+  socket.on('pullStraw', (instanceId) => {
+    const roomId = socketRoom.get(socket.id);
+    const room = roomId ? rooms.get(roomId) : undefined;
+    const player = room?.players.get(socket.id);
+    if (!roomId || !room || !player || room.resetTimer || !cooldownReady(socket.id, 'straw', 75)) return;
+    if (!Number.isInteger(instanceId) || instanceId < 0 || instanceId >= HAY_COUNT || room.pulledStraws.has(instanceId)) return;
+    room.pulledStraws.add(instanceId);
+    io.to(roomId).emit('strawPulled', { playerId: player.id, instanceId });
+  });
+
   socket.on('action', (type) => {
     const roomId = socketRoom.get(socket.id);
     const room = roomId ? rooms.get(roomId) : undefined;
@@ -224,7 +237,7 @@ io.on('connection', (socket) => {
     if (type === 'sneeze') systemMessage(roomId, `${player.name}: АПЧХИ! Стог официально стал менее организованным.`);
     if (type === 'goose') systemMessage(roomId, `Гусь оштрафовал ${player.name} за подозрительно профессиональный поиск.`);
     if (type === 'magnet') {
-      const needle = (awaitImportNeedle(room.seed));
+      const needle = needlePosition(room.seed);
       const dx = needle.x - player.position.x;
       const dz = needle.z - player.position.z;
       const distance = Math.hypot(dx, dz);
@@ -263,25 +276,6 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => leaveCurrentRoom(socket.id));
 });
-
-// Kept sync so action handling stays cheap in the hot path.
-function awaitImportNeedle(seed: number) {
-  const random = mulberryForServer(seed ^ 0x51e2d);
-  const angle = random() * Math.PI * 2;
-  const radius = 1.2 + Math.sqrt(random()) * 7.25;
-  const x = Math.cos(angle) * radius;
-  const z = Math.sin(angle) * radius;
-  return { x, z };
-}
-
-function mulberryForServer(seed: number): () => number {
-  return () => {
-    let value = (seed += 0x6d2b79f5);
-    value = Math.imul(value ^ (value >>> 15), value | 1);
-    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
-    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
-  };
-}
 
 app.get('/api/health', (_request, response) => {
   response.json({ ok: true, service: 'haywire', rooms: rooms.size, players: socketRoom.size, uptime: Math.round(process.uptime()) });

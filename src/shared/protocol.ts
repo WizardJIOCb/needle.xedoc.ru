@@ -32,6 +32,7 @@ export interface RoomSnapshot {
   round: number;
   roundEndsAt: number;
   seed: number;
+  pulledStraws: number[];
 }
 
 export interface ChatMessage {
@@ -76,6 +77,11 @@ export interface MagnetResult {
   strength: 'cold' | 'warm' | 'hot' | 'molten';
 }
 
+export interface StrawPulledEvent {
+  playerId: string;
+  instanceId: number;
+}
+
 export interface ServerToClientEvents {
   rooms: (rooms: RoomSummary[]) => void;
   roomState: (state: RoomSnapshot) => void;
@@ -84,8 +90,9 @@ export interface ServerToClientEvents {
   playerMoved: (player: Pick<PlayerState, 'id' | 'position' | 'yaw'>) => void;
   chat: (message: ChatMessage) => void;
   action: (action: ActionEvent) => void;
+  strawPulled: (event: StrawPulledEvent) => void;
   magnetResult: (result: MagnetResult) => void;
-  roundReset: (state: Pick<RoomSnapshot, 'round' | 'roundEndsAt' | 'seed' | 'players'>) => void;
+  roundReset: (state: Pick<RoomSnapshot, 'round' | 'roundEndsAt' | 'seed' | 'players' | 'pulledStraws'>) => void;
   toast: (message: string) => void;
 }
 
@@ -98,5 +105,6 @@ export interface ClientToServerEvents {
   move: (position: Vec3State, yaw: number) => void;
   chat: (text: string) => void;
   action: (type: 'sneeze' | 'magnet' | 'goose') => void;
+  pullStraw: (instanceId: number) => void;
   search: () => void;
 }
