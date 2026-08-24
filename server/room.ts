@@ -12,6 +12,7 @@ export interface RoomState {
   roundEndsAt: number;
   seed: number;
   resetTimer?: NodeJS.Timeout;
+  roundTimer?: NodeJS.Timeout;
 }
 
 export function safeText(value: unknown, maxLength: number, fallback = ''): string {

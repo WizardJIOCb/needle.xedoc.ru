@@ -27,6 +27,7 @@ import {
 const PORT = Number(process.env.PORT || 3088);
 const isProduction = process.env.NODE_ENV === 'production';
 const app = express();
+app.disable('x-powered-by');
 const httpServer = createServer(app);
 const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer, {
   cors: { origin: isProduction ? false : true },
@@ -69,6 +70,7 @@ function leaveCurrentRoom(socketId: string): void {
   systemMessage(roomId, `${player.name} вышел из сена.`);
   if (room.players.size === 0) {
     if (room.resetTimer) clearTimeout(room.resetTimer);
+    if (room.roundTimer) clearTimeout(room.roundTimer);
     rooms.delete(roomId);
   }
   broadcastRooms();
@@ -94,10 +96,12 @@ function announceJoin(socketId: string, room: RoomState): void {
 }
 
 function nextRound(room: RoomState): void {
+  if (room.roundTimer) clearTimeout(room.roundTimer);
   room.round += 1;
   room.seed = Math.floor(Math.random() * 2_000_000_000);
   room.roundEndsAt = Date.now() + ROUND_MS;
   room.resetTimer = undefined;
+  room.roundTimer = undefined;
   for (const player of room.players.values()) {
     const angle = Math.random() * Math.PI * 2;
     player.position = { x: Math.cos(angle) * 12, y: 0, z: Math.sin(angle) * 12 };
@@ -109,7 +113,19 @@ function nextRound(room: RoomState): void {
     players: [...room.players.values()],
   });
   systemMessage(room.id, `Раунд ${room.round}. Новая игла уже где-то там. Да, мы тоже её потеряли.`);
+  scheduleRound(room);
   broadcastRooms();
+}
+
+function scheduleRound(room: RoomState): void {
+  if (room.roundTimer) clearTimeout(room.roundTimer);
+  const wait = Math.max(1000, room.roundEndsAt - Date.now());
+  room.roundTimer = setTimeout(() => {
+    room.roundTimer = undefined;
+    if (!rooms.has(room.id) || room.players.size === 0 || room.resetTimer) return;
+    systemMessage(room.id, 'Время вышло. Игла победила этот раунд, но война продолжается.');
+    nextRound(room);
+  }, wait);
 }
 
 function cooldownReady(socketId: string, key: string, duration: number): boolean {
@@ -130,6 +146,7 @@ io.on('connection', (socket) => {
     const room = createRoom(options.name);
     while (rooms.has(room.id)) room.id = Math.random().toString(36).slice(2, 7).toUpperCase();
     rooms.set(room.id, room);
+    scheduleRound(room);
     const result = join(socket.id, room, options.playerName, options.avatar);
     callback(result);
     if (result.ok) announceJoin(socket.id, room);
@@ -148,6 +165,7 @@ io.on('connection', (socket) => {
     if (!room) {
       room = createRoom('Быстрый стог');
       rooms.set(room.id, room);
+      scheduleRound(room);
     }
     const result = join(socket.id, room, options.playerName, options.avatar);
     callback(result);
@@ -226,6 +244,10 @@ io.on('connection', (socket) => {
       return;
     }
     player.score += 1;
+    if (room.roundTimer) {
+      clearTimeout(room.roundTimer);
+      room.roundTimer = undefined;
+    }
     io.to(roomId).emit('action', {
       playerId: player.id,
       playerName: player.name,
@@ -267,8 +289,11 @@ app.get('/api/health', (_request, response) => {
 if (isProduction) {
   const currentDir = path.dirname(fileURLToPath(import.meta.url));
   const staticDir = path.resolve(currentDir, '../../dist');
-  app.use(express.static(staticDir, { maxAge: '7d', immutable: true }));
-  app.get('*path', (_request, response) => response.sendFile(path.join(staticDir, 'index.html')));
+  app.use('/assets', express.static(path.join(staticDir, 'assets'), { maxAge: '1y', immutable: true }));
+  app.get('*path', (_request, response) => {
+    response.set('Cache-Control', 'no-cache');
+    response.sendFile(path.join(staticDir, 'index.html'));
+  });
 } else {
   const { createServer: createViteServer } = await import('vite');
   const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
