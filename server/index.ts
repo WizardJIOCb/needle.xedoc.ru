@@ -26,6 +26,7 @@ import {
 
 const PORT = Number(process.env.PORT || 3088);
 const isProduction = process.env.NODE_ENV === 'production';
+const HOST = process.env.HOST || (isProduction ? '127.0.0.1' : '0.0.0.0');
 const app = express();
 app.disable('x-powered-by');
 const httpServer = createServer(app);
@@ -300,6 +301,6 @@ if (isProduction) {
   app.use(vite.middlewares);
 }
 
-httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`HAYWIRE listening on http://0.0.0.0:${PORT} (${isProduction ? 'production' : 'development'})`);
+httpServer.listen(PORT, HOST, () => {
+  console.log(`HAYWIRE listening on http://${HOST}:${PORT} (${isProduction ? 'production' : 'development'})`);
 });
