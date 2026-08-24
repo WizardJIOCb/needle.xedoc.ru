@@ -1,0 +1,21 @@
+[Unit]
+Description=HAYWIRE multiplayer WebGL game
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/needle.xedoc.ru
+Environment=NODE_ENV=production
+Environment=PORT=3097
+ExecStart=/usr/bin/node dist-server/server/index.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
